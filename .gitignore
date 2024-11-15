@@ -1,0 +1,53 @@
+# Build outputs
+/build/
+/output/
+
+# Tools and binaries
+*.zip
+*.tar.gz
+/tools/
+/ghostc/tools/
+*.bin
+*.exe
+*.dll
+*.so
+*.dylib
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Toolchain
+arm-toolchain/
+gcc-arm-none-eabi/
+/ghostc/tools/arm-toolchain.zip
+/ghostc/tools/gcc-arm-none-eabi/
+
+# Build artifacts
+*.o
+*.d
+*.elf
+*.img
+*.bin
+*.map
+*.lst
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+*.cmake
+!CMakeLists.txt
+!toolchain.cmake
+!build.cmake
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# System files
+.DS_Store
+Thumbs.db

@@ -1,0 +1,64 @@
+#ifndef GHOST_KERNEL_CONFIG_H
+#define GHOST_KERNEL_CONFIG_H
+
+// Kernel version
+#define GHOST_KERNEL_VERSION_MAJOR 0
+#define GHOST_KERNEL_VERSION_MINOR 1
+#define GHOST_KERNEL_VERSION_PATCH 0
+
+// Platform configuration
+#define GHOST_PLATFORM_RPI_ZERO_W
+#define GHOST_ARCH_ARM
+#define GHOST_BITS 32
+
+// Memory configuration
+#define GHOST_PAGE_SIZE 4096
+#define GHOST_KERNEL_HEAP_SIZE (1024 * 1024 * 16)  // 16MB kernel heap
+#define GHOST_USER_SPACE_START 0x00000000
+#define GHOST_KERNEL_SPACE_START 0xC0000000
+
+// Security configuration
+#define GHOST_SECURE_BOOT
+#define GHOST_KERNEL_ASLR
+#define GHOST_STACK_PROTECTOR
+#define GHOST_KERNEL_CFI  // Control Flow Integrity
+
+// Process configuration
+#define GHOST_MAX_PROCESSES 1024
+#define GHOST_MAX_THREADS_PER_PROCESS 64
+#define GHOST_DEFAULT_STACK_SIZE (1024 * 1024)  // 1MB stack
+
+// Network configuration
+#define GHOST_MAX_NETWORK_INTERFACES 8
+#define GHOST_NETWORK_BUFFER_SIZE (1024 * 64)  // 64KB network buffer
+
+// File system configuration
+#define GHOST_MAX_OPEN_FILES 1024
+#define GHOST_MAX_FILE_SIZE (1024 * 1024 * 1024)  // 1GB max file size
+#define GHOST_MAX_PATH_LENGTH 4096
+
+// Security features
+#define GHOST_ENABLE_PROCESS_ISOLATION
+#define GHOST_ENABLE_MEMORY_PROTECTION
+#define GHOST_ENABLE_SYSCALL_FILTERING
+#define GHOST_ENABLE_NETWORK_MONITORING
+
+// Debug configuration
+#ifdef GHOST_DEBUG
+#define GHOST_ENABLE_DEBUG_OUTPUT
+#define GHOST_ENABLE_STACK_TRACE
+#define GHOST_ENABLE_MEMORY_TRACKING
+#endif
+
+// Hardware-specific configuration
+#define GHOST_CPU_FREQ 1000000000  // 1GHz
+#define GHOST_RAM_SIZE (512 * 1024 * 1024)  // 512MB RAM
+#define GHOST_UART_BASE 0x20201000
+#define GHOST_GPIO_BASE 0x20200000
+
+// Bootloader configuration
+#define GHOST_BOOTLOADER_START 0x8000
+#define GHOST_KERNEL_START 0x80000
+#define GHOST_INITRD_START 0x800000
+
+#endif // GHOST_KERNEL_CONFIG_H

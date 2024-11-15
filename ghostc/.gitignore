@@ -1,0 +1,61 @@
+# Build output
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.dylib
+
+# IDE/Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Dependencies and large files
+tools/
+*.zip
+*.7z
+*.tar
+*.gz
+*.rar
+
+# Large binary files
+tools/arm-toolchain.zip
+*.img
+*.iso
+*.vmdk
+*.vdi
+
+# Compiled output
+build/
+bin/
+obj/
+
+# Debug files
+*.pdb
+*.ilk
+*.exp
+
+# System files
+.DS_Store
+Thumbs.db
+
+# ARM toolchain specific
+*.d
+*.d.$$
+*.map
+*.lst
+*.elf
+*.bin
+
+# Additional build artifacts
+*.hex
+*.eep
+*.lss
+*.sym
+
+# Debug and analysis
+*.dSYM/
+*.su
+*.idb
