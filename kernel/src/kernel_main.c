@@ -1,168 +1,134 @@
-#include "../config/kernel_config.h"
 #include <stdint.h>
 #include <stdbool.h>
+#include "process/process.h"
+#include "net/network.h"
+#include "net/network_security.h"
+#include "mm/memory.h"
+#include "security/security_events.h"
 
 // Forward declarations
-static void init_security(void);
-static void init_memory(void);
-static void init_processes(void);
-static void init_network(void);
-static void init_filesystem(void);
+void kernel_panic(const char* message);
+bool init_mmu(void);
+bool init_kernel_heap(void);
+bool init_page_allocator(void);
+bool init_memory_protection(void);
+bool init_process_table(void);
+bool init_scheduler(void);
+bool init_ipc(void);
+bool init_process_monitor(void);
+bool init_network_interfaces(void);
+bool init_network_protocols(void);
+bool init_firewall(void);
+bool init_network_monitor(void);
+bool init_vfs(void);
+bool mount_root_fs(void);
+bool init_fs_security(void);
+bool init_file_monitor(void);
+void init_stack_protection(void);
+void init_cfi(void);
+bool init_secure_syscalls(void);
+bool init_security_monitors(void);
+void randomize_kernel_space(void);
+void init_secure_memory(void);
+void setup_mmu_security(void);
+void init_crypto(void);
+void init_process_isolation(void);
+void init_network_security(void);
+void init_syscall_filter(void);
+bool schedule_tasks(void);
+bool check_security_alerts(void);
+bool monitor_system_health(void);
+void update_system_stats(void);
 
-// Boot status codes
-typedef enum {
-    BOOT_SUCCESS = 0,
-    BOOT_ERROR_MEMORY = 1,
-    BOOT_ERROR_SECURITY = 2,
-    BOOT_ERROR_PROCESS = 3,
-    BOOT_ERROR_NETWORK = 4,
-    BOOT_ERROR_FILESYSTEM = 5
-} BootStatus;
+// Main kernel entry point
+void kernel_main(void) {
+    // Initialize secure boot
+    if (!verify_boot_signature()) {
+        kernel_panic("Boot failed");
+    }
 
-// Initialize core kernel components with error handling
-static BootStatus init_kernel_components(void) {
-    // Initialize memory management
+    // Initialize memory subsystem
     if (!init_memory()) {
-        log_boot_error("Memory initialization failed");
-        return BOOT_ERROR_MEMORY;
+        kernel_panic("Memory init failed");
     }
 
     // Initialize security subsystem
     if (!init_security()) {
-        log_boot_error("Security initialization failed");
-        return BOOT_ERROR_SECURITY;
+        kernel_panic("Security init failed");
     }
 
-    // Initialize process management
-    if (!init_processes()) {
-        log_boot_error("Process initialization failed");
-        return BOOT_ERROR_PROCESS;
-    }
-
-    // Initialize network stack
-    if (!init_network()) {
-        log_boot_error("Network initialization failed");
-        return BOOT_ERROR_NETWORK;
-    }
-
-    // Initialize filesystem
-    if (!init_filesystem()) {
-        log_boot_error("Filesystem initialization failed");
-        return BOOT_ERROR_FILESYSTEM;
-    }
-
-    return BOOT_SUCCESS;
-}
-
-// Kernel entry point with enhanced error handling
-void kernel_main(uint32_t r0, uint32_t r1, uint32_t atags) {
-    // Disable interrupts during initialization
-    __asm volatile("cpsid if");
-
-    // Log boot start
-    log_boot_start();
-
-    // Initialize core components
-    BootStatus status = init_kernel_components();
-    if (status != BOOT_SUCCESS) {
-        kernel_panic("Boot failed with status: %d", status);
-    }
-
-    // Enable security features with logging
-    log_boot_progress("Enabling security features");
-
-#ifdef GHOST_SECURE_BOOT
-    log_boot_progress("Verifying secure boot");
-    if (!verify_secure_boot()) {
-        log_boot_error("Secure boot verification failed");
-        kernel_panic("Secure boot verification failed");
-    }
-#endif
-
-#ifdef GHOST_KERNEL_ASLR
-    log_boot_progress("Randomizing kernel space");
+    // Randomize kernel space layout
     randomize_kernel_space();
-#endif
 
-#ifdef GHOST_STACK_PROTECTOR
-    log_boot_progress("Initializing stack protection");
+    // Initialize stack protection
     init_stack_protection();
-#endif
 
-#ifdef GHOST_KERNEL_CFI
-    log_boot_progress("Enabling Control Flow Integrity");
+    // Initialize Control Flow Integrity
     init_cfi();
-#endif
 
-    // Initialize system calls with logging
-    log_boot_progress("Initializing system calls");
+    // Initialize secure system calls
     if (!init_secure_syscalls()) {
-        log_boot_error("System call initialization failed");
-        kernel_panic("System call initialization failed");
+        kernel_panic("Syscall init failed");
     }
 
-    // Set up security monitors with logging
-    log_boot_progress("Setting up security monitors");
+    // Initialize security monitors
     if (!init_security_monitors()) {
-        log_boot_error("Security monitor initialization failed");
-        kernel_panic("Security monitor initialization failed");
+        kernel_panic("Security monitor init failed");
     }
 
-    // Log successful boot
-    log_boot_complete();
-
-    // Enable interrupts
-    __asm volatile("cpsie if");
-
-    // Start system
+    // Main kernel loop
     while (1) {
-        // Kernel main loop with enhanced monitoring
+        // Schedule tasks
         if (!schedule_tasks()) {
-            log_system_error("Task scheduling failed");
+            kernel_panic("Task scheduling failed");
         }
 
+        // Check security alerts
         if (!check_security_alerts()) {
-            log_system_error("Security alert check failed");
+            kernel_panic("Security alert check failed");
         }
 
+        // Monitor system health
         if (!monitor_system_health()) {
-            log_system_error("System health check failed");
+            kernel_panic("Health monitoring failed");
         }
 
-        // System statistics
+        // Update system statistics
         update_system_stats();
     }
 }
 
-// Security initialization
-static void init_security(void) {
-    // Initialize secure memory regions
+// Initialize security subsystem
+static bool init_security(void) {
+    // Initialize secure memory management
     init_secure_memory();
 
-    // Set up memory protection
+    // Setup MMU security features
     setup_mmu_security();
 
-    // Initialize crypto subsystem
+    // Initialize cryptographic services
     init_crypto();
 
-    // Set up process isolation
+    // Initialize process isolation
     init_process_isolation();
 
-    // Configure network security
+    // Initialize network security
     init_network_security();
 
-    // Set up syscall filtering
+    // Initialize system call filtering
     init_syscall_filter();
+
+    return true;
 }
 
-// Memory management initialization
+// Initialize memory subsystem
 static bool init_memory(void) {
     // Initialize MMU
     if (!init_mmu()) {
         return false;
     }
 
-    // Set up kernel heap
+    // Initialize kernel heap
     if (!init_kernel_heap()) {
         return false;
     }
@@ -172,7 +138,7 @@ static bool init_memory(void) {
         return false;
     }
 
-    // Set up memory protection
+    // Initialize memory protection
     if (!init_memory_protection()) {
         return false;
     }
@@ -180,24 +146,24 @@ static bool init_memory(void) {
     return true;
 }
 
-// Process management initialization
+// Initialize process subsystem
 static bool init_processes(void) {
     // Initialize process table
     if (!init_process_table()) {
         return false;
     }
 
-    // Set up scheduler
+    // Initialize scheduler
     if (!init_scheduler()) {
         return false;
     }
 
-    // Initialize IPC mechanisms
+    // Initialize IPC
     if (!init_ipc()) {
         return false;
     }
 
-    // Set up process monitoring
+    // Initialize process monitor
     if (!init_process_monitor()) {
         return false;
     }
@@ -205,14 +171,14 @@ static bool init_processes(void) {
     return true;
 }
 
-// Network stack initialization
+// Initialize network subsystem
 static bool init_network(void) {
     // Initialize network interfaces
     if (!init_network_interfaces()) {
         return false;
     }
 
-    // Set up network protocols
+    // Initialize network protocols
     if (!init_network_protocols()) {
         return false;
     }
@@ -222,7 +188,7 @@ static bool init_network(void) {
         return false;
     }
 
-    // Set up network monitoring
+    // Initialize network monitor
     if (!init_network_monitor()) {
         return false;
     }
@@ -230,7 +196,7 @@ static bool init_network(void) {
     return true;
 }
 
-// File system initialization
+// Initialize filesystem subsystem
 static bool init_filesystem(void) {
     // Initialize virtual filesystem
     if (!init_vfs()) {
@@ -242,12 +208,12 @@ static bool init_filesystem(void) {
         return false;
     }
 
-    // Set up file system security
+    // Initialize filesystem security
     if (!init_fs_security()) {
         return false;
     }
 
-    // Initialize file monitoring
+    // Initialize file monitor
     if (!init_file_monitor()) {
         return false;
     }
@@ -255,9 +221,8 @@ static bool init_filesystem(void) {
     return true;
 }
 
-// Security monitoring
+// Check security alerts
 bool check_security_alerts(void) {
-    // Check for security violations
     if (!check_memory_violations()) {
         return false;
     }
@@ -274,7 +239,6 @@ bool check_security_alerts(void) {
         return false;
     }
 
-    // Handle any detected threats
     if (!handle_security_threats()) {
         return false;
     }
@@ -282,9 +246,8 @@ bool check_security_alerts(void) {
     return true;
 }
 
-// System health monitoring
+// Monitor system health
 bool monitor_system_health(void) {
-    // Monitor resource usage
     if (!check_memory_usage()) {
         return false;
     }
@@ -301,7 +264,6 @@ bool monitor_system_health(void) {
         return false;
     }
 
-    // Check for system anomalies
     if (!detect_anomalies()) {
         return false;
     }
@@ -311,14 +273,6 @@ bool monitor_system_health(void) {
 
 // Kernel panic handler
 void kernel_panic(const char* message) {
-    // Disable interrupts
-    __asm volatile("cpsid if");
-
-    // Log panic message
-    log_kernel_panic(message);
-
-    // Halt system
-    while (1) {
-        __asm volatile("wfi");
-    }
+    // TODO: Implement proper panic handling
+    while(1) {}
 }

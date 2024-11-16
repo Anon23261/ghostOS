@@ -139,6 +139,52 @@ ghostOS/
 3. Execute `build.ps1` to build the system
 4. Use `create_image.ps1` to create a bootable SD card image
 
+## Deployment Guide
+
+### Prerequisites
+- Raspberry Pi Zero W
+- MicroSD card (minimum 8GB)
+- Power supply for Raspberry Pi
+- MicroSD card reader
+- Windows PC with PowerShell
+
+### Building and Deploying
+1. Set up build environment:
+   ```powershell
+   .\setup_build_env.ps1
+   ```
+
+2. Build GhostOS:
+   ```powershell
+   .\build.ps1 -BuildType release -Package
+   ```
+
+3. Flash to SD Card:
+   - Insert MicroSD card into your computer
+   - Run the flash script:
+     ```powershell
+     .\tools\flash_sd.ps1 -DriveLetter X
+     ```
+     Replace X with your SD card drive letter
+
+4. First Boot:
+   - Insert the MicroSD card into Raspberry Pi Zero W
+   - Connect power supply
+   - System will perform initial setup and security checks
+   - Default login: admin/ghostos
+
+### Troubleshooting
+- If boot fails, check SD card integrity
+- Verify build was successful
+- Ensure proper power supply (5V, 2.5A recommended)
+- Check LED indicators for boot status
+
+### Security Notes
+- Change default password immediately
+- Enable secure boot
+- Configure network security settings
+- Keep system updated
+
 ## Security Notice
 
 GhostOS is designed for educational purposes and cybersecurity research. Users must comply with all applicable laws and regulations. The developers assume no liability for misuse or damage.

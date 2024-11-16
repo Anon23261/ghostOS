@@ -1,6 +1,7 @@
 #include "../../config/kernel_config.h"
 #include <stdint.h>
 #include <stdbool.h>
+#include <string.h>
 
 // Memory management structures
 typedef struct {
@@ -103,8 +104,87 @@ int map_secure_region(uint32_t virt_addr, uint32_t size, uint32_t flags) {
     return 0;
 }
 
+// Memory allocation tracking
+#define MAX_ALLOCATIONS 1024
+typedef struct {
+    void* addr;
+    size_t size;
+    uint32_t flags;
+    bool used;
+} MemoryAllocation;
+
+static MemoryAllocation g_allocations[MAX_ALLOCATIONS];
+static size_t g_allocation_count = 0;
+
+// Memory allocation
+void* kmalloc(size_t size, uint32_t flags) {
+    // Align size to page boundary
+    size = (size + GHOST_PAGE_SIZE - 1) & ~(GHOST_PAGE_SIZE - 1);
+    
+    // Find free region
+    for (size_t i = 0; i < g_allocation_count; i++) {
+        if (!g_allocations[i].used && g_allocations[i].size >= size) {
+            g_allocations[i].used = true;
+            g_allocations[i].flags = flags;
+            
+            // Add guard pages if requested
+            if (flags & MEM_FLAG_GUARD) {
+                add_guard_pages(g_allocations[i].addr, size);
+            }
+            
+            return g_allocations[i].addr;
+        }
+    }
+    
+    // Allocate new region if space available
+    if (g_allocation_count < MAX_ALLOCATIONS) {
+        void* addr = alloc_pages(size);
+        if (addr) {
+            g_allocations[g_allocation_count].addr = addr;
+            g_allocations[g_allocation_count].size = size;
+            g_allocations[g_allocation_count].flags = flags;
+            g_allocations[g_allocation_count].used = true;
+            g_allocation_count++;
+            
+            // Add guard pages if requested
+            if (flags & MEM_FLAG_GUARD) {
+                add_guard_pages(addr, size);
+            }
+            
+            return addr;
+        }
+    }
+    
+    return NULL;
+}
+
+// Memory deallocation
+void kfree(void* addr) {
+    if (!addr) return;
+    
+    for (size_t i = 0; i < g_allocation_count; i++) {
+        if (g_allocations[i].addr == addr && g_allocations[i].used) {
+            // Remove guard pages if present
+            if (g_allocations[i].flags & MEM_FLAG_GUARD) {
+                remove_guard_pages(addr, g_allocations[i].size);
+            }
+            
+            // Clear memory before marking as free
+            memset(addr, 0, g_allocations[i].size);
+            g_allocations[i].used = false;
+            return;
+        }
+    }
+}
+
 // Initialize guard pages for stack protection
 void init_guard_pages(void) {
+    // Initialize guard page tracking
+    init_guard_page_table();
+    
+    // Set up guard page fault handler
+    register_fault_handler(FAULT_TYPE_GUARD_PAGE, handle_guard_page_fault);
+    
     // Place guard pages at stack boundaries
     uint32_t stack_start = GHOST_USER_SPACE_START;
     uint32_t stack_end = stack_start + GHOST_DEFAULT_STACK_SIZE;
@@ -118,20 +198,35 @@ void init_guard_pages(void) {
 
 // Memory violation handler
 void handle_memory_violation(uint32_t fault_addr, uint32_t fault_status) {
-    // Check if it's a security violation
-    bool is_security_violation = (fault_status & 0x40) != 0;
-
-    if (is_security_violation) {
-        // Log security violation
-        log_security_event(SECURITY_EVENT_MEMORY_VIOLATION,
-                         fault_addr, fault_status);
-
-        // Terminate offending process
-        terminate_current_process();
+    char error_msg[256];
+    const char* violation_type = "Unknown";
+    
+    // Determine violation type
+    switch (fault_status & 0xF) {
+        case 0x1: violation_type = "Alignment"; break;
+        case 0x2: violation_type = "Debug Event"; break;
+        case 0x3: violation_type = "Access Flag"; break;
+        case 0x4: violation_type = "Instruction Cache Maintenance"; break;
+        case 0x5: violation_type = "Translation"; break;
+        case 0x6: violation_type = "Access Permission"; break;
+        case 0x7: violation_type = "Domain"; break;
+        case 0x8: violation_type = "External Abort"; break;
+        case 0x9: violation_type = "TLB Conflict Abort"; break;
     }
-
-    // Handle other memory faults
-    handle_page_fault(fault_addr, fault_status);
+    
+    // Log detailed error information
+    snprintf(error_msg, sizeof(error_msg), 
+             "Memory violation: %s at address 0x%08x (status: 0x%08x)",
+             violation_type, fault_addr, fault_status);
+    log_error(error_msg);
+    
+    // Check if violation occurred in secure region
+    if (is_secure_region(fault_addr)) {
+        trigger_security_alert(ALERT_MEMORY_VIOLATION, fault_addr);
+    }
+    
+    // Terminate offending process
+    terminate_current_process();
 }
 
 // Memory protection check

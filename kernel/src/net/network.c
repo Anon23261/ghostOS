@@ -1,339 +1,425 @@
-#include "../../config/kernel_config.h"
+#include <stddef.h>
 #include <stdint.h>
-#include <stdbool.h>
+#include "../../include/net/network.h"
+#include "../../include/memory/kmalloc.h"
+#include "../../include/kernel/spinlock.h"
 
-// Network security flags
-#define NET_SEC_ENCRYPTED    0x01
-#define NET_SEC_MONITORED    0x02
-#define NET_SEC_FILTERED     0x04
-#define NET_SEC_ISOLATED     0x08
-#define NET_SEC_RESTRICTED   0x10
+// Static variables for network subsystem state
+static bool network_initialized = false;
+static spinlock_t network_lock = SPINLOCK_INIT;
+static NetworkInterface* interfaces[MAX_NETWORK_INTERFACES] = {NULL};
+static NetworkConnection* connections[MAX_NETWORK_CONNECTIONS] = {NULL};
+static uint32_t next_connection_id = 1;
 
-// Protocol security flags
-#define PROTO_SEC_VALIDATED   0x01
-#define PROTO_SEC_ENCRYPTED   0x02
-#define PROTO_SEC_SIGNED      0x04
-#define PROTO_SEC_MONITORED   0x08
-
-// Connection states
-typedef enum {
-    CONN_STATE_NEW,
-    CONN_STATE_HANDSHAKING,
-    CONN_STATE_ESTABLISHED,
-    CONN_STATE_CLOSING,
-    CONN_STATE_CLOSED
-} ConnectionState;
-
-// Network interface structure
-typedef struct {
-    uint32_t if_index;
-    uint8_t mac_addr[6];
-    uint32_t ip_addr;
-    uint32_t netmask;
-    uint32_t security_flags;
-    bool is_secure;
-} NetworkInterface;
-
-// Network connection structure
-typedef struct {
-    uint32_t conn_id;
-    uint32_t local_addr;
-    uint16_t local_port;
-    uint32_t remote_addr;
-    uint16_t remote_port;
-    uint32_t security_flags;
-    uint32_t process_id;
-    bool is_encrypted;
-    ConnectionState state;
-    uint32_t protocol_flags;
-    uint32_t last_activity;
-    uint32_t bytes_sent;
-    uint32_t bytes_received;
-    uint32_t security_violations;
-} NetworkConnection;
-
-// Network tables
-static NetworkInterface interfaces[MAX_NETWORK_INTERFACES];
-static NetworkConnection connections[MAX_NETWORK_CONNECTIONS];
-
-// Initialize network subsystem
-void init_network_interfaces(void) {
-    // Initialize network interfaces
+// Helper functions
+static bool is_valid_interface(const NetworkInterface* iface) {
+    if (!iface) return false;
     for (int i = 0; i < MAX_NETWORK_INTERFACES; i++) {
-        interfaces[i].if_index = i;
-        interfaces[i].security_flags = 0;
-        interfaces[i].is_secure = true;
+        if (interfaces[i] == iface) return true;
     }
+    return false;
+}
 
-    // Initialize connection table
+static bool is_valid_connection(const NetworkConnection* conn) {
+    if (!conn) return false;
     for (int i = 0; i < MAX_NETWORK_CONNECTIONS; i++) {
-        connections[i].conn_id = 0;
-        connections[i].security_flags = 0;
-        connections[i].state = CONN_STATE_NEW;
-        connections[i].protocol_flags = 0;
-        connections[i].last_activity = 0;
-        connections[i].bytes_sent = 0;
-        connections[i].bytes_received = 0;
-        connections[i].security_violations = 0;
+        if (connections[i] == conn) return true;
+    }
+    return false;
+}
+
+// Network initialization
+NetworkError init_network(void) {
+    spinlock_acquire(&network_lock);
+    
+    if (network_initialized) {
+        spinlock_release(&network_lock);
+        return NET_ERR_ALREADY_INITIALIZED;
     }
 
-    // Initialize network security
-    init_network_security();
+    // Initialize interface array
+    for (int i = 0; i < MAX_NETWORK_INTERFACES; i++) {
+        interfaces[i] = NULL;
+    }
+
+    // Initialize connection array
+    for (int i = 0; i < MAX_NETWORK_CONNECTIONS; i++) {
+        connections[i] = NULL;
+    }
+
+    network_initialized = true;
+    spinlock_release(&network_lock);
+    return NET_ERR_SUCCESS;
 }
 
-// Initialize network security features
-void init_network_security(void) {
-    // Initialize firewall
-    init_firewall();
+NetworkError cleanup_network(void) {
+    spinlock_acquire(&network_lock);
+    
+    if (!network_initialized) {
+        spinlock_release(&network_lock);
+        return NET_ERR_NOT_INITIALIZED;
+    }
 
-    // Set up network monitoring
-    init_network_monitor();
+    // Close all active connections
+    for (int i = 0; i < MAX_NETWORK_CONNECTIONS; i++) {
+        if (connections[i]) {
+            close_connection(connections[i]);
+            kfree(connections[i]);
+            connections[i] = NULL;
+        }
+    }
 
-    // Initialize encryption subsystem
-    init_network_encryption();
+    // Cleanup interfaces
+    for (int i = 0; i < MAX_NETWORK_INTERFACES; i++) {
+        if (interfaces[i]) {
+            if (interfaces[i]->tx_buffer) kfree(interfaces[i]->tx_buffer);
+            if (interfaces[i]->rx_buffer) kfree(interfaces[i]->rx_buffer);
+            kfree(interfaces[i]);
+            interfaces[i] = NULL;
+        }
+    }
 
-    // Set up network isolation
-    init_network_isolation();
+    network_initialized = false;
+    spinlock_release(&network_lock);
+    return NET_ERR_SUCCESS;
 }
 
-// Create secure network connection
-uint32_t create_secure_connection(uint32_t local_addr, uint16_t local_port,
-                                uint32_t remote_addr, uint16_t remote_port,
-                                uint32_t security_flags) {
-    // Find free connection slot
-    int slot = find_free_connection();
-    if (slot < 0) return 0;
+// Interface management
+NetworkError register_network_interface(NetworkInterface* iface) {
+    if (!network_initialized) return NET_ERR_NOT_INITIALIZED;
+    if (!iface) return NET_ERR_INVALID_PARAM;
 
-    NetworkConnection* conn = &connections[slot];
+    spinlock_acquire(&network_lock);
+
+    // Find empty slot
+    int slot = -1;
+    for (int i = 0; i < MAX_NETWORK_INTERFACES; i++) {
+        if (!interfaces[i]) {
+            slot = i;
+            break;
+        }
+    }
+
+    if (slot == -1) {
+        spinlock_release(&network_lock);
+        return NET_ERR_INTERFACE_FULL;
+    }
+
+    // Allocate buffers
+    iface->tx_buffer = kmalloc(iface->tx_queue_len);
+    iface->rx_buffer = kmalloc(iface->rx_queue_len);
+
+    if (!iface->tx_buffer || !iface->rx_buffer) {
+        if (iface->tx_buffer) kfree(iface->tx_buffer);
+        if (iface->rx_buffer) kfree(iface->rx_buffer);
+        spinlock_release(&network_lock);
+        return NET_ERR_OUT_OF_MEMORY;
+    }
+
+    interfaces[slot] = iface;
+    spinlock_release(&network_lock);
+    return NET_ERR_SUCCESS;
+}
+
+NetworkError unregister_network_interface(NetworkInterface* iface) {
+    if (!network_initialized) return NET_ERR_NOT_INITIALIZED;
+    if (!iface) return NET_ERR_INVALID_PARAM;
+
+    spinlock_acquire(&network_lock);
+
+    if (!is_valid_interface(iface)) {
+        spinlock_release(&network_lock);
+        return NET_ERR_INTERFACE_NOT_FOUND;
+    }
+
+    // Find and remove interface
+    for (int i = 0; i < MAX_NETWORK_INTERFACES; i++) {
+        if (interfaces[i] == iface) {
+            if (iface->tx_buffer) kfree(iface->tx_buffer);
+            if (iface->rx_buffer) kfree(iface->rx_buffer);
+            kfree(iface);
+            interfaces[i] = NULL;
+            break;
+        }
+    }
+
+    spinlock_release(&network_lock);
+    return NET_ERR_SUCCESS;
+}
+
+NetworkError configure_network_interface(NetworkInterface* iface, const NetworkAddress* addr) {
+    if (!network_initialized) return NET_ERR_NOT_INITIALIZED;
+    if (!iface || !addr) return NET_ERR_INVALID_PARAM;
+
+    spinlock_acquire(&network_lock);
+
+    if (!is_valid_interface(iface)) {
+        spinlock_release(&network_lock);
+        return NET_ERR_INTERFACE_NOT_FOUND;
+    }
+
+    iface->addr = *addr;
+    spinlock_release(&network_lock);
+    return NET_ERR_SUCCESS;
+}
+
+// Connection management
+NetworkError create_connection(NetworkConnection** conn) {
+    if (!network_initialized) return NET_ERR_NOT_INITIALIZED;
+    if (!conn) return NET_ERR_INVALID_PARAM;
+
+    spinlock_acquire(&network_lock);
+
+    // Find empty slot
+    int slot = -1;
+    for (int i = 0; i < MAX_NETWORK_CONNECTIONS; i++) {
+        if (!connections[i]) {
+            slot = i;
+            break;
+        }
+    }
+
+    if (slot == -1) {
+        spinlock_release(&network_lock);
+        return NET_ERR_NO_RESOURCES;
+    }
+
+    // Allocate new connection
+    NetworkConnection* new_conn = kmalloc(sizeof(NetworkConnection));
+    if (!new_conn) {
+        spinlock_release(&network_lock);
+        return NET_ERR_OUT_OF_MEMORY;
+    }
 
     // Initialize connection
-    conn->conn_id = generate_connection_id();
-    conn->local_addr = local_addr;
-    conn->local_port = local_port;
-    conn->remote_addr = remote_addr;
-    conn->remote_port = remote_port;
-    conn->security_flags = security_flags;
-    conn->process_id = get_current_process_id();
-    conn->is_encrypted = (security_flags & NET_SEC_ENCRYPTED) != 0;
-    conn->state = CONN_STATE_HANDSHAKING;
+    new_conn->id = next_connection_id++;
+    new_conn->state = NET_STATE_CLOSED;
+    new_conn->flags = 0;
+    new_conn->timeout = 0;
+    new_conn->last_activity = 0;
+    new_conn->interface = NULL;
+    new_conn->private_data = NULL;
 
-    // Set up encryption if required
-    if (conn->is_encrypted) {
-        setup_connection_encryption(conn);
-    }
+    connections[slot] = new_conn;
+    *conn = new_conn;
 
-    // Apply security policies
-    apply_security_policies(conn);
-
-    return conn->conn_id;
+    spinlock_release(&network_lock);
+    return NET_ERR_SUCCESS;
 }
 
-// Protocol validation
-bool validate_protocol(const void* packet, size_t size) {
-    // Check protocol headers
-    if (!validate_protocol_headers(packet, size)) {
-        return false;
+NetworkError close_connection(NetworkConnection* conn) {
+    if (!network_initialized) return NET_ERR_NOT_INITIALIZED;
+    if (!conn) return NET_ERR_INVALID_PARAM;
+
+    spinlock_acquire(&network_lock);
+
+    if (!is_valid_connection(conn)) {
+        spinlock_release(&network_lock);
+        return NET_ERR_NOT_FOUND;
     }
 
-    // Verify protocol state
-    if (!verify_protocol_state(packet)) {
-        return false;
-    }
-
-    // Check for protocol anomalies
-    if (detect_protocol_anomalies(packet, size)) {
-        return false;
-    }
-
-    return true;
-}
-
-// Network packet filtering
-bool filter_packet(const void* packet, size_t size) {
-    // Validate protocol first
-    if (!validate_protocol(packet, size)) {
-        log_security_event(SECURITY_EVENT_PROTOCOL_VIOLATION, 0, 0);
-        return false;
-    }
-
-    // Check packet headers
-    if (!validate_packet_headers(packet, size)) {
-        return false;
-    }
-
-    // Apply firewall rules
-    if (!check_firewall_rules(packet)) {
-        return false;
-    }
-
-    // Check for malicious patterns
-    if (detect_malicious_pattern(packet, size)) {
-        return false;
-    }
-
-    // Verify packet integrity
-    if (!verify_packet_integrity(packet, size)) {
-        return false;
-    }
-
-    return true;
-}
-
-// Connection state tracking
-void track_connection_state(NetworkConnection* conn) {
-    uint32_t current_time = get_system_time();
-    
-    // Update activity timestamp
-    conn->last_activity = current_time;
-
-    // Check for timeout
-    if (current_time - conn->last_activity > CONNECTION_TIMEOUT) {
-        handle_connection_timeout(conn);
-    }
-
-    // Monitor traffic patterns
-    analyze_traffic_pattern(conn);
-
-    // Check for state violations
-    if (detect_state_violation(conn)) {
-        handle_state_violation(conn);
-    }
-}
-
-// Network monitoring
-void monitor_network_activity(void) {
-    // Monitor active connections
+    // Find and remove connection
     for (int i = 0; i < MAX_NETWORK_CONNECTIONS; i++) {
-        NetworkConnection* conn = &connections[i];
-        if (conn->conn_id != 0) {
-            // Check connection status
-            check_connection_status(conn);
-
-            // Monitor traffic patterns
-            analyze_traffic_pattern(conn);
-
-            // Check for anomalies
-            detect_network_anomalies(conn);
-
-            // Track connection state
-            track_connection_state(conn);
+        if (connections[i] == conn) {
+            if (conn->private_data) kfree(conn->private_data);
+            kfree(conn);
+            connections[i] = NULL;
+            break;
         }
     }
 
-    // Monitor interfaces
-    for (int i = 0; i < MAX_NETWORK_INTERFACES; i++) {
-        NetworkInterface* iface = &interfaces[i];
-        if (iface->security_flags & NET_SEC_MONITORED) {
-            monitor_interface_traffic(iface);
+    spinlock_release(&network_lock);
+    return NET_ERR_SUCCESS;
+}
+
+NetworkError find_connection(uint32_t id, NetworkConnection** conn) {
+    if (!network_initialized) return NET_ERR_NOT_INITIALIZED;
+    if (!conn) return NET_ERR_INVALID_PARAM;
+
+    spinlock_acquire(&network_lock);
+
+    // Search for connection with matching ID
+    for (int i = 0; i < MAX_NETWORK_CONNECTIONS; i++) {
+        if (connections[i] && connections[i]->id == id) {
+            *conn = connections[i];
+            spinlock_release(&network_lock);
+            return NET_ERR_SUCCESS;
         }
     }
 
-    // Monitor protocol usage
-    monitor_protocol_usage();
-
-    // Analyze traffic patterns
-    analyze_network_patterns();
+    spinlock_release(&network_lock);
+    return NET_ERR_NOT_FOUND;
 }
 
-// Protocol usage monitoring
-void monitor_protocol_usage(void) {
-    // Track protocol statistics
-    update_protocol_stats();
+NetworkError update_connection_state(NetworkConnection* conn, NetworkState state) {
+    if (!network_initialized) return NET_ERR_NOT_INITIALIZED;
+    if (!conn) return NET_ERR_INVALID_PARAM;
 
-    // Check for protocol anomalies
-    detect_protocol_anomalies_global();
+    spinlock_acquire(&network_lock);
 
-    // Monitor encrypted traffic ratio
-    monitor_encryption_usage();
+    if (!is_valid_connection(conn)) {
+        spinlock_release(&network_lock);
+        return NET_ERR_NOT_FOUND;
+    }
+
+    conn->state = state;
+    spinlock_release(&network_lock);
+    return NET_ERR_SUCCESS;
 }
 
-// Handle network security event
-void handle_network_security_event(uint32_t event_type, void* event_data) {
-    // Log security event
-    log_security_event(SECURITY_EVENT_NETWORK,
-                      event_type,
-                      get_current_process_id());
+// Packet operations
+NetworkError send_packet(NetworkConnection* conn, const NetworkPacket* packet) {
+    if (!network_initialized) return NET_ERR_NOT_INITIALIZED;
+    if (!conn || !packet) return NET_ERR_INVALID_PARAM;
 
-    switch (event_type) {
-        case NETWORK_EVENT_INTRUSION:
-            handle_intrusion_attempt(event_data);
-            break;
+    spinlock_acquire(&network_lock);
 
-        case NETWORK_EVENT_ANOMALY:
-            handle_network_anomaly(event_data);
-            break;
-
-        case NETWORK_EVENT_VIOLATION:
-            handle_security_violation(event_data);
-            break;
+    if (!is_valid_connection(conn)) {
+        spinlock_release(&network_lock);
+        return NET_ERR_NOT_FOUND;
     }
 
-    // Notify security monitor
-    notify_security_monitor(event_type);
+    if (conn->state != NET_STATE_CONNECTED) {
+        spinlock_release(&network_lock);
+        return NET_ERR_CONNECTION_CLOSED;
+    }
+
+    // TODO: Implement actual packet sending logic
+    // This would involve:
+    // 1. Packet validation
+    // 2. Security checks
+    // 3. Fragmentation if needed
+    // 4. Interface driver calls
+    
+    spinlock_release(&network_lock);
+    return NET_ERR_NOT_IMPLEMENTED;
 }
 
-// Secure packet transmission
-int send_secure_packet(NetworkConnection* conn, const void* data, size_t size) {
-    // Validate connection state
-    if (conn->state != CONN_STATE_ESTABLISHED) {
-        return -1;
+NetworkError receive_packet(NetworkConnection* conn, NetworkPacket* packet) {
+    if (!network_initialized) return NET_ERR_NOT_INITIALIZED;
+    if (!conn || !packet) return NET_ERR_INVALID_PARAM;
+
+    spinlock_acquire(&network_lock);
+
+    if (!is_valid_connection(conn)) {
+        spinlock_release(&network_lock);
+        return NET_ERR_NOT_FOUND;
     }
 
-    // Update statistics
-    conn->bytes_sent += size;
-
-    // Check security flags
-    if (!verify_connection_security(conn)) {
-        return -1;
+    if (conn->state != NET_STATE_CONNECTED) {
+        spinlock_release(&network_lock);
+        return NET_ERR_CONNECTION_CLOSED;
     }
 
-    // Encrypt data if required
-    void* encrypted_data = NULL;
-    size_t encrypted_size = 0;
-    if (conn->is_encrypted) {
-        encrypt_packet_data(data, size, &encrypted_data, &encrypted_size);
-        data = encrypted_data;
-        size = encrypted_size;
-    }
+    // TODO: Implement actual packet receiving logic
+    // This would involve:
+    // 1. Interface driver calls
+    // 2. Packet reassembly
+    // 3. Security verification
+    // 4. Data copying
 
-    // Send packet
-    int result = send_packet(conn, data, size);
-
-    // Clean up
-    if (encrypted_data) {
-        secure_free(encrypted_data);
-    }
-
-    return result;
+    spinlock_release(&network_lock);
+    return NET_ERR_NOT_IMPLEMENTED;
 }
 
-// Secure packet reception
-int receive_secure_packet(NetworkConnection* conn, void* buffer, size_t size) {
-    // Receive encrypted packet
-    void* received_data = NULL;
-    size_t received_size = 0;
-    int result = receive_packet(conn, &received_data, &received_size);
+NetworkError verify_packet_integrity(const NetworkPacket* packet) {
+    if (!network_initialized) return NET_ERR_NOT_INITIALIZED;
+    if (!packet) return NET_ERR_INVALID_PARAM;
 
-    if (result > 0 && conn->is_encrypted) {
-        // Decrypt received data
-        void* decrypted_data = NULL;
-        size_t decrypted_size = 0;
-        if (decrypt_packet_data(received_data, received_size,
-                              &decrypted_data, &decrypted_size)) {
-            // Copy decrypted data to buffer
-            size_t copy_size = (decrypted_size < size) ? decrypted_size : size;
-            secure_memcpy(buffer, decrypted_data, copy_size);
-            secure_free(decrypted_data);
-            result = copy_size;
-        } else {
-            result = -1;
-        }
+    // TODO: Implement packet integrity verification
+    // This would involve:
+    // 1. Checksum verification
+    // 2. Size validation
+    // 3. Protocol compliance checks
+    // 4. Security signature verification
+
+    return NET_ERR_NOT_IMPLEMENTED;
+}
+
+NetworkError create_packet(NetworkPacket** packet, uint32_t size) {
+    if (!network_initialized) return NET_ERR_NOT_INITIALIZED;
+    if (!packet || size == 0 || size > MAX_PACKET_SIZE) return NET_ERR_INVALID_PARAM;
+
+    NetworkPacket* new_packet = kmalloc(sizeof(NetworkPacket));
+    if (!new_packet) return NET_ERR_OUT_OF_MEMORY;
+
+    new_packet->data = kmalloc(size);
+    if (!new_packet->data) {
+        kfree(new_packet);
+        return NET_ERR_OUT_OF_MEMORY;
     }
 
-    // Clean up
-    if (received_data) {
-        secure_free(received_data);
+    new_packet->length = size;
+    *packet = new_packet;
+    return NET_ERR_SUCCESS;
+}
+
+NetworkError destroy_packet(NetworkPacket* packet) {
+    if (!network_initialized) return NET_ERR_NOT_INITIALIZED;
+    if (!packet) return NET_ERR_INVALID_PARAM;
+
+    if (packet->data) kfree(packet->data);
+    kfree(packet);
+    return NET_ERR_SUCCESS;
+}
+
+// Security operations
+NetworkError verify_connection_security(NetworkConnection* conn) {
+    if (!network_initialized) return NET_ERR_NOT_INITIALIZED;
+    if (!conn) return NET_ERR_INVALID_PARAM;
+
+    spinlock_acquire(&network_lock);
+
+    if (!is_valid_connection(conn)) {
+        spinlock_release(&network_lock);
+        return NET_ERR_NOT_FOUND;
     }
 
-    return result;
+    // TODO: Implement security verification
+    // This would involve:
+    // 1. Certificate validation
+    // 2. Encryption status check
+    // 3. Security policy compliance
+    // 4. Intrusion detection
+
+    spinlock_release(&network_lock);
+    return NET_ERR_NOT_IMPLEMENTED;
+}
+
+NetworkError handle_network_violation(NetworkConnection* conn, NetworkEventType event_type) {
+    if (!network_initialized) return NET_ERR_NOT_INITIALIZED;
+    if (!conn) return NET_ERR_INVALID_PARAM;
+
+    spinlock_acquire(&network_lock);
+
+    if (!is_valid_connection(conn)) {
+        spinlock_release(&network_lock);
+        return NET_ERR_NOT_FOUND;
+    }
+
+    // TODO: Implement violation handling
+    // This would involve:
+    // 1. Logging the violation
+    // 2. Applying security policy
+    // 3. Notifying system monitor
+    // 4. Taking protective action
+
+    spinlock_release(&network_lock);
+    return NET_ERR_NOT_IMPLEMENTED;
+}
+
+NetworkError verify_network_integrity(void) {
+    if (!network_initialized) return NET_ERR_NOT_INITIALIZED;
+
+    spinlock_acquire(&network_lock);
+
+    // TODO: Implement network integrity verification
+    // This would involve:
+    // 1. Interface status check
+    // 2. Connection state validation
+    // 3. Resource usage verification
+    // 4. Security policy compliance check
+
+    spinlock_release(&network_lock);
+    return NET_ERR_NOT_IMPLEMENTED;
 }

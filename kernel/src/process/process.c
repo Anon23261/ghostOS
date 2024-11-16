@@ -1,15 +1,30 @@
-#include "../../config/kernel_config.h"
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
+#include "security/security.h"
+#include "security/security_events.h"
+#include "process/process.h"
 
 // Process states
 typedef enum {
-    PROCESS_STATE_NEW,
+    PROCESS_STATE_UNUSED,
+    PROCESS_STATE_CREATED,
     PROCESS_STATE_READY,
     PROCESS_STATE_RUNNING,
     PROCESS_STATE_BLOCKED,
-    PROCESS_STATE_TERMINATED
+    PROCESS_STATE_TERMINATED,
+    PROCESS_STATE_DEAD,
+    PROCESS_STATE_WAITING
 } ProcessState;
+
+// Process priority levels
+typedef enum {
+    PROCESS_PRIORITY_IDLE = 0,
+    PROCESS_PRIORITY_LOW = 1,
+    PROCESS_PRIORITY_NORMAL = 2,
+    PROCESS_PRIORITY_HIGH = 3,
+    PROCESS_PRIORITY_REALTIME = 4
+} ProcessPriority;
 
 // Process security flags
 #define PROC_SEC_PRIVILEGED   0x01
@@ -39,174 +54,200 @@ typedef struct {
     uint32_t memory_quota;
     uint32_t cpu_quota;
     uint32_t parent_pid;
-    uint32_t security_context;
+    void* security_context;
     bool is_secure;
     uint32_t capabilities;     // Process capabilities
     uint32_t effective_caps;   // Currently active capabilities
     uint32_t inheritable_caps; // Capabilities that can be inherited
+    ProcessPriority priority;
+    char name[256];
+    uint32_t security_level;
+    uint32_t last_activity;
+    void* stack_pointer;
+    void* memory_context;
 } ProcessControlBlock;
+
+// Maximum number of processes
+#define MAX_PROCESSES 256
 
 // Process table
 static ProcessControlBlock process_table[MAX_PROCESSES];
 static uint32_t next_pid = 1;
 
-// Initialize process management
-void init_process_table(void) {
-    // Clear process table
-    for (int i = 0; i < MAX_PROCESSES; i++) {
+// Current running process
+static ProcessControlBlock* current_process = NULL;
+
+// Initialize process table
+bool init_process_table(void) {
+    for (size_t i = 0; i < MAX_PROCESSES; i++) {
+        process_table[i].state = PROCESS_STATE_UNUSED;
         process_table[i].pid = 0;
-        process_table[i].state = PROCESS_STATE_NEW;
-        process_table[i].security_flags = 0;
-        process_table[i].capabilities = 0;
-        process_table[i].effective_caps = 0;
-        process_table[i].inheritable_caps = 0;
+        process_table[i].parent_pid = 0;
+        process_table[i].security_context = NULL;
+        process_table[i].stack_ptr = NULL;
+        process_table[i].program_counter = NULL;
     }
 
-    // Initialize idle process
+    // Create idle process
     create_idle_process();
+    return true;
 }
 
-// Create new process with security context
-uint32_t create_process(void* entry_point, uint32_t security_flags) {
-    uint32_t pid = next_pid++;
-    ProcessControlBlock* pcb = &process_table[pid % MAX_PROCESSES];
+// Process management functions
+ProcessControlBlock* get_current_process(void) {
+    return current_process;
+}
 
-    // Initialize PCB
-    pcb->pid = pid;
-    pcb->state = PROCESS_STATE_NEW;
+uint32_t create_process(const char* name, ProcessPriority priority, uint32_t security_flags) {
+    // Find free slot in process table
+    int slot = -1;
+    for (int i = 0; i < MAX_PROCESSES; i++) {
+        if (process_table[i].state == PROCESS_STATE_UNUSED) {
+            slot = i;
+            break;
+        }
+    }
+
+    if (slot == -1) {
+        return 0; // No free slots
+    }
+
+    // Initialize process control block
+    ProcessControlBlock* pcb = &process_table[slot];
+    pcb->pid = next_pid++;
+    strncpy(pcb->name, name, sizeof(pcb->name) - 1);
+    pcb->name[sizeof(pcb->name) - 1] = '\0';
+    pcb->priority = priority;
     pcb->security_flags = security_flags;
-    pcb->program_counter = entry_point;
-    pcb->is_secure = true;
+    pcb->state = PROCESS_STATE_CREATED;
+    pcb->security_level = SECURITY_LEVEL_LOW;
+    pcb->last_activity = get_system_time();
+    pcb->stack_pointer = NULL;
+    pcb->memory_context = NULL;
+    pcb->security_context = NULL;
 
-    // Initialize capabilities
-    pcb->capabilities = 0;
-    pcb->effective_caps = 0;
-    pcb->inheritable_caps = 0;
-
-    // Set default capabilities based on security flags
-    if (security_flags & PROC_SEC_PRIVILEGED) {
-        pcb->capabilities = PROC_CAP_SYS_ADMIN | PROC_CAP_NET_ADMIN;
-        pcb->effective_caps = pcb->capabilities;
-    }
-
-    // Allocate secure stack
-    pcb->stack_ptr = allocate_secure_stack();
-
-    // Set up process isolation
-    if (security_flags & PROC_SEC_ISOLATED) {
-        setup_process_isolation(pcb);
-    }
-
-    // Initialize security context
-    pcb->security_context = create_security_context(security_flags);
-
-    return pid;
+    return pcb->pid;
 }
 
-// Process scheduler with security checks
-void schedule_tasks(void) {
+// Schedule tasks
+bool schedule_tasks(void) {
     ProcessControlBlock* current = get_current_process();
     ProcessControlBlock* next = NULL;
+    uint32_t highest_priority = PROCESS_PRIORITY_IDLE;
 
-    // Find next runnable process
+    // Find highest priority ready process
     for (int i = 0; i < MAX_PROCESSES; i++) {
         ProcessControlBlock* pcb = &process_table[i];
         if (pcb->state == PROCESS_STATE_READY) {
-            // Perform security checks
             if (check_process_security(pcb)) {
-                next = pcb;
-                break;
+                if (pcb->priority > highest_priority) {
+                    highest_priority = pcb->priority;
+                    next = pcb;
+                }
             }
         }
     }
 
-    if (next) {
-        // Context switch with security measures
+    if (next != NULL && next != current) {
         secure_context_switch(current, next);
+        return true;
     }
+
+    return false;
 }
 
-// Security context switch
+// Perform secure context switch
 void secure_context_switch(ProcessControlBlock* current, ProcessControlBlock* next) {
-    // Save current context
-    if (current) {
+    // Save current context if valid
+    if (current != NULL) {
         save_secure_context(current);
     }
 
-    // Security checks before switch
+    // Verify integrity of next process
     if (!verify_process_integrity(next)) {
-        handle_security_violation(next);
+        handle_security_violation(SECURITY_EVENT_PROCESS_VIOLATION, next);
         return;
     }
 
-    // Update MMU context
+    // Update memory context
     update_secure_memory_context(next);
 
     // Restore next context
     restore_secure_context(next);
 }
 
-// Process security verification
+// Verify process integrity
 bool verify_process_integrity(ProcessControlBlock* pcb) {
-    // Verify process memory regions
+    // Verify memory integrity
     if (!verify_process_memory(pcb)) {
-        log_security_event(SECURITY_EVENT_MEMORY_VIOLATION, pcb->pid, 0);
+        notify_security_monitor(SECURITY_EVENT_MEMORY_VIOLATION);
         return false;
     }
 
-    // Check for capability violations
+    // Verify context integrity
+    if (!verify_process_context(pcb)) {
+        notify_security_monitor(SECURITY_EVENT_SYSTEM_VIOLATION);
+        return false;
+    }
+
+    // Verify capability integrity
     if (!verify_capability_integrity(pcb)) {
-        log_security_event(SECURITY_EVENT_CAPABILITY_VIOLATION, pcb->pid, 0);
-        return false;
-    }
-
-    // Verify security context
-    if (!verify_security_context_integrity(pcb->security_context)) {
-        log_security_event(SECURITY_EVENT_CONTEXT_VIOLATION, pcb->pid, 0);
-        return false;
-    }
-
-    // Check stack integrity
-    if (!verify_stack_integrity(pcb->stack_ptr)) {
-        return false;
-    }
-
-    // Verify code segment
-    if (!verify_code_integrity(pcb->program_counter)) {
+        notify_security_monitor(SECURITY_EVENT_PROCESS_VIOLATION);
         return false;
     }
 
     return true;
 }
 
-// Capability checking
-bool check_process_capability(ProcessControlBlock* pcb, uint32_t required_cap) {
-    return (pcb->effective_caps & required_cap) == required_cap;
-}
-
-// Handle process security violation
-void handle_security_violation(ProcessControlBlock* pcb) {
+// Handle security violation
+void handle_security_violation(SecurityEventType event_type, const void* event_data) {
     // Log security event
-    log_security_event(SECURITY_EVENT_PROCESS_VIOLATION,
-                      pcb->pid,
-                      pcb->security_context);
+    SecurityEvent event = {
+        .type = event_type,
+        .timestamp = get_system_time(),
+        .process_id = get_current_process()->pid,
+        .severity = 3, // Critical
+        .data = (void*)event_data,
+        .data_size = sizeof(ProcessControlBlock)
+    };
+    
+    log_security_event(&event);
 
-    // Terminate process
+    // Terminate violating process
+    ProcessControlBlock* pcb = (ProcessControlBlock*)event_data;
     terminate_process(pcb->pid);
 
     // Notify security monitor
-    notify_security_monitor(SECURITY_EVENT_PROCESS_VIOLATION);
+    notify_security_monitor(event_type);
 }
 
-// Process monitoring
+// Terminate process
+void terminate_process(uint32_t pid) {
+    ProcessControlBlock* pcb = find_process(pid);
+    if (pcb == NULL) {
+        return;
+    }
+
+    // Clean up process resources
+    pcb->state = PROCESS_STATE_DEAD;
+    pcb->security_level = SECURITY_LEVEL_LOW;
+    pcb->priority = PROCESS_PRIORITY_IDLE;
+    pcb->security_flags = 0;
+
+    // Free memory
+    free_secure_memory(pcb);
+}
+
+// Monitor processes
 void monitor_processes(void) {
+    // Monitor all active processes
     for (int i = 0; i < MAX_PROCESSES; i++) {
         ProcessControlBlock* pcb = &process_table[i];
-        if (pcb->state != PROCESS_STATE_NEW && pcb->state != PROCESS_STATE_TERMINATED) {
+        if (pcb->state == PROCESS_STATE_RUNNING) {
             // Check process behavior
             check_process_behavior(pcb);
 
-            // Monitor resource usage
+            // Check resource usage
             check_process_resources(pcb);
 
             // Verify security constraints
@@ -215,56 +256,37 @@ void monitor_processes(void) {
     }
 }
 
-// Process behavior analysis
+// Check process behavior
 void check_process_behavior(ProcessControlBlock* pcb) {
-    // Check for suspicious system calls
+    // Analyze syscall patterns
     analyze_syscall_pattern(pcb);
 
-    // Monitor memory access patterns
+    // Check memory access patterns
     check_memory_access_pattern(pcb);
 
-    // Analyze CPU usage patterns
+    // Analyze CPU usage
     analyze_cpu_usage(pcb);
 
-    // Check for potential exploits
+    // Detect exploit attempts
     detect_exploit_attempts(pcb);
 
-    // Check for capability abuse
+    // Monitor capability usage
     monitor_capability_usage(pcb);
 
-    // Check for privilege escalation attempts
+    // Detect privilege escalation
     detect_privilege_escalation(pcb);
 }
 
-// Capability monitoring
+// Monitor capability usage
 void monitor_capability_usage(ProcessControlBlock* pcb) {
-    // Track capability usage patterns
+    // Update capability usage statistics
     update_capability_usage_stats(pcb);
 
-    // Check for suspicious capability combinations
+    // Detect suspicious capability usage
     if (detect_suspicious_capability_usage(pcb)) {
-        log_security_event(SECURITY_EVENT_SUSPICIOUS_CAPS, pcb->pid, pcb->effective_caps);
+        notify_security_monitor(SECURITY_EVENT_PROCESS_VIOLATION);
     }
 
     // Monitor privileged operations
     monitor_privileged_operations(pcb);
-}
-
-// Terminate process securely
-void terminate_process(uint32_t pid) {
-    ProcessControlBlock* pcb = &process_table[pid % MAX_PROCESSES];
-
-    // Clean up security context
-    cleanup_security_context(pcb->security_context);
-
-    // Free secure memory
-    free_secure_memory(pcb);
-
-    // Clear process state
-    pcb->state = PROCESS_STATE_TERMINATED;
-    pcb->security_flags = 0;
-    pcb->security_context = 0;
-
-    // Notify parent process
-    notify_parent_process(pcb->parent_pid);
 }
